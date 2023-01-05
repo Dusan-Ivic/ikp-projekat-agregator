@@ -1,6 +1,8 @@
 #include <ws2tcpip.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <WIndows.h>
+#include <conio.h>
 
 #define DEFAULT_BUFLEN 512
 #define DEFAULT_PORT "5000"
@@ -11,23 +13,46 @@ int socketIndex = 0;
 
 // Variable used to store function return value
 int iResult;
+HANDLE importantSemaphore;
+HANDLE standardSemaphore;
+CRITICAL_SECTION csBufferImp;
+CRITICAL_SECTION csBufferStd;
 
 struct Message {
     int value;
     bool isImportant;
 };
+Message buffStandard[500 * sizeof(Message)];
+Message buffImportant[500 * sizeof(Message)];
+int countStd = 0;
+int countImp = 0;
 
 struct SocketAcceptorThreadData {
     SOCKET listeningSocket;
 };
 
+struct Structure
+{
+    SOCKET senderSocketStruct;
+    char recvbuf[DEFAULT_BUFLEN];
+    int nextInstancePortStruct;
+    Message* msg;
+};
+Structure recvStructInit;
+
 bool InitializeWindowsSockets();
 SOCKET InitializeAgregatorAsServer(int port);
 SOCKET InitializeAgregatorAsClient(int port);
 DWORD WINAPI socketAcceptor(LPVOID lpParam);
+DWORD WINAPI  recvMsg(LPVOID lpParam);
+DWORD WINAPI  sendImportant(LPVOID lpParam);
+DWORD WINAPI  sendStandard(LPVOID lpParam);
 
-int main(void) 
+int main(void)
 {
+    InitializeCriticalSection(&csBufferImp);
+    InitializeCriticalSection(&csBufferStd);
+
     int currentInstanceID;
     printf("Current instance ID (integer): ");
     scanf("%d", &currentInstanceID);
@@ -83,57 +108,25 @@ int main(void)
 
     printf("==========================================\n");
 
-    while (true)
-    {
-        for (int i = 0; i < socketIndex; i++)
-        {
-            iResult = recv(acceptedSockets[i], recvbuf, DEFAULT_BUFLEN, 0);
+    // Struct for recv thread
+    recvStructInit.senderSocketStruct = senderSocket;
+    recvStructInit.nextInstancePortStruct = nextInstancePort;
 
-            if (iResult > 0)
-            {
-                // Poruka je primljena bez gresaka
+    // Thread for recv
+    DWORD recvID, importantMsgId, standardMsgId;
+    HANDLE hrecv, hImportantMsg, hStandardMsg;
+    //PTP_POOL test;
+    //test = CreateThreadpool(hrecv);
 
-                printf("Received from previous instance\n");
+    importantSemaphore = CreateSemaphore(0, 0, 1, NULL);
+    standardSemaphore = CreateSemaphore(0, 0, 1, NULL);
 
-                Message* message = (Message *)recvbuf;
+    hrecv = CreateThread(NULL, 0, &recvMsg, &recvStructInit, 0, &recvID);
 
-                printf("[%s]: %d\n", message->isImportant ? "IMPORTANT" : "STANDARD", message->value);
+    hImportantMsg = CreateThread(NULL, 0, &sendImportant, &recvStructInit, 0, &importantMsgId);
+    hStandardMsg = CreateThread(NULL, 0, &sendStandard, &recvStructInit, 0, &standardMsgId);
 
-                // Send data to next instance
-                iResult = send(senderSocket, (const char*)message, sizeof(message), 0);
-
-                if (iResult == SOCKET_ERROR)
-                {
-                    printf("send failed with error: %d\n", WSAGetLastError());
-                    closesocket(senderSocket);
-                    WSACleanup();
-                    return 1;
-                }
-
-                printf("Forwarded to %s!\n", nextInstancePort == 5000 ? "DESTINATION" : "AGREGATOR");
-                printf("==========================================\n");
-
-            }
-            else if (iResult == 0)
-            {
-                printf("Connection with previous instance closed.\n");
-                closesocket(acceptedSockets[i]);
-                continue;
-            }
-            else
-            {
-                if (WSAGetLastError() == WSAEWOULDBLOCK)
-                {
-
-                }
-                else
-                {
-                    closesocket(acceptedSockets[i]);
-                    continue;
-                }
-            }
-        }
-    }
+    _getch();
 
     // Shut down the connection
     iResult = shutdown(acceptedSocket, SD_SEND);
@@ -149,27 +142,30 @@ int main(void)
     closesocket(receiverSocket);
     closesocket(senderSocket);
     closesocket(acceptedSocket);
-    for (int i = 0; i < socketIndex; i++) {
-        closesocket(acceptedSockets[i]);
-    }
+    closesocket(acceptedSockets[socketIndex]);
 
+    DeleteCriticalSection(&csBufferImp);
+    DeleteCriticalSection(&csBufferStd);
+
+    //CloseThreadpool(test);
     WSACleanup();
 
     return 0;
 }
 
+
+
 bool InitializeWindowsSockets()
 {
     WSADATA wsaData;
-	// Initialize windows sockets library for this process
-    if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0)
+    // Initialize windows sockets library for this process
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
     {
         printf("WSAStartup failed with error: %d\n", WSAGetLastError());
         return false;
     }
-	return true;
+    return true;
 }
-
 SOCKET InitializeAgregatorAsServer(int port)
 {
     // Socket used for listening for new clients 
@@ -181,7 +177,7 @@ SOCKET InitializeAgregatorAsServer(int port)
     }
 
     // Prepare address information structures
-    addrinfo *resultingAddress = NULL;
+    addrinfo* resultingAddress = NULL;
     addrinfo hints;
 
     memset(&hints, 0, sizeof(hints));
@@ -204,8 +200,8 @@ SOCKET InitializeAgregatorAsServer(int port)
 
     // Create a socket for listening
     listeningSocket = socket(AF_INET,      // IPv4 address famly
-                             SOCK_STREAM,  // stream socket
-                             IPPROTO_TCP); // TCP
+        SOCK_STREAM,  // stream socket
+        IPPROTO_TCP); // TCP
 
     if (listeningSocket == INVALID_SOCKET)
     {
@@ -242,7 +238,6 @@ SOCKET InitializeAgregatorAsServer(int port)
 
     return listeningSocket;
 }
-
 SOCKET InitializeAgregatorAsClient(int port)
 {
     // Socket used to communicate with server
@@ -255,8 +250,8 @@ SOCKET InitializeAgregatorAsClient(int port)
 
     // Create a socket for connecting
     connectSocket = socket(AF_INET,
-                           SOCK_STREAM,
-                           IPPROTO_TCP);
+        SOCK_STREAM,
+        IPPROTO_TCP);
 
     if (connectSocket == INVALID_SOCKET)
     {
@@ -283,10 +278,9 @@ SOCKET InitializeAgregatorAsClient(int port)
 
     return connectSocket;
 }
-
 DWORD WINAPI socketAcceptor(LPVOID lpParam)
 {
-    SocketAcceptorThreadData* data = (SocketAcceptorThreadData *)lpParam;
+    SocketAcceptorThreadData* data = (SocketAcceptorThreadData*)lpParam;
 
     while (true)
     {
@@ -321,4 +315,121 @@ DWORD WINAPI socketAcceptor(LPVOID lpParam)
     }
 
     return 0;
+}
+DWORD WINAPI  recvMsg(LPVOID lpParam)
+{
+    Structure recvStruct = *(Structure*)lpParam;
+    while (true)
+    {
+        for (int i = 0; i < socketIndex; i++)
+        {
+            iResult = recv(acceptedSockets[i], recvStruct.recvbuf, DEFAULT_BUFLEN, 0);
+
+            if (iResult > 0)
+            {
+                // Poruka je primljena bez gresaka
+                printf("Received from previous instance\n");
+
+                Message* message = (Message*)recvStruct.recvbuf;
+                recvStruct.msg = message;
+                printf("[%s]: %d\n", message->isImportant ? "IMPORTANT" : "STANDARD", message->value);
+
+
+                if (message->isImportant)
+                {
+                    EnterCriticalSection(&csBufferImp);
+                    buffImportant[countImp].isImportant = true;
+                    buffImportant[countImp].value = message->value;
+                    ReleaseSemaphore(importantSemaphore, 1, NULL);     //upali semafor  importantSemaphore
+                    LeaveCriticalSection(&csBufferImp);
+                    countImp++;
+                }
+                else
+                {
+                    EnterCriticalSection(&csBufferStd);
+                    buffStandard[countStd].isImportant = false;
+                    buffStandard[countStd].value = message->value;
+                    ReleaseSemaphore(standardSemaphore, 1, NULL);     //upali semafor  standardSemaphore
+                    LeaveCriticalSection(&csBufferStd);
+                    countStd++;
+                }
+            }
+            else if (iResult == 0)
+            {
+                printf("Connection with previous instance closed.\n");
+                closesocket(acceptedSockets[i]);
+                continue;
+            }
+            else
+            {
+                if (WSAGetLastError() == WSAEWOULDBLOCK)
+                {
+
+                }
+                else
+                {
+                    closesocket(acceptedSockets[i]);
+                    continue;
+                }
+            }
+        }
+    }
+}
+DWORD WINAPI  sendImportant(LPVOID lpParam)
+{    
+    Structure recvStruct = *(Structure*)lpParam;
+
+    //wait for semaphore
+    while (WaitForSingleObject(importantSemaphore,INFINITE)== WAIT_OBJECT_0)
+    {   
+        // Send data to next instance
+        EnterCriticalSection(&csBufferImp);
+        Message msg = buffImportant[countImp];
+
+        iResult = send(recvStruct.senderSocketStruct, (const char*)&msg, sizeof(msg), 0);
+        if (iResult == SOCKET_ERROR)
+        {
+            printf("send failed with error: %d\n", WSAGetLastError());
+            closesocket(recvStruct.senderSocketStruct);
+            WSACleanup();
+            return 1;
+        }
+
+        printf("Forwarded to %s!\n", recvStruct.nextInstancePortStruct == 5000 ? "DESTINATION" : "AGREGATOR");
+        printf("==========================================\n");
+
+        countImp--;
+        LeaveCriticalSection(&csBufferImp);
+    }    
+}
+DWORD WINAPI  sendStandard(LPVOID lpParam)
+{    
+    Structure recvStruct = *(Structure*)lpParam;
+
+    //wait for semaphore
+    while (WaitForSingleObject(standardSemaphore, INFINITE) == WAIT_OBJECT_0)
+    {
+        // Send data to next instance
+        EnterCriticalSection(&csBufferStd);
+        for (int i = 0; i < countStd; i++) 
+        {
+            Message msg = buffStandard[i];
+            iResult = send(recvStruct.senderSocketStruct, (const char*)&msg, sizeof(msg), 0);
+
+            if (iResult == SOCKET_ERROR)
+            {
+                printf("send failed with error: %d\n", WSAGetLastError());
+                closesocket(recvStruct.senderSocketStruct);
+                WSACleanup();
+                return 1;
+            }
+
+            printf("Forwarded to %s!\n", recvStruct.nextInstancePortStruct == 5000 ? "DESTINATION" : "AGREGATOR");
+            printf("==========================================\n");            
+        }    
+        countStd = 0;
+        LeaveCriticalSection(&csBufferStd);
+        Sleep(1000);
+    }
+    
 }

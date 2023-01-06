@@ -40,6 +40,7 @@ RingBuffer StandardBuffer;
 
 CRITICAL_SECTION ImportantBufferAccess;
 CRITICAL_SECTION StandardBufferAccess;
+CRITICAL_SECTION ConsoleAccess;
 
 HANDLE ImportantBufferEmpty;
 HANDLE ImportantBufferFull;
@@ -56,6 +57,7 @@ DWORD WINAPI sendImportant(LPVOID lpParam);
 DWORD WINAPI sendStandard(LPVOID lpParam);
 Message getMessageFromBuffer(RingBuffer *buffer);
 void addMessageToBuffer(RingBuffer *buffer, Message message);
+bool isBufferEmpty(RingBuffer* buffer);
 
 int main(void)
 {
@@ -131,6 +133,7 @@ int main(void)
     {
         InitializeCriticalSection(&ImportantBufferAccess);
         InitializeCriticalSection(&StandardBufferAccess);
+        InitializeCriticalSection(&ConsoleAccess);
 
         // Thread za primanje podataka sa prethodne instance
         ThreadData receiveMessagesThreadData;
@@ -202,6 +205,7 @@ int main(void)
 
     DeleteCriticalSection(&ImportantBufferAccess);
     DeleteCriticalSection(&StandardBufferAccess);
+    DeleteCriticalSection(&ConsoleAccess);
 
     //CloseThreadpool(test);
     WSACleanup();
@@ -386,10 +390,13 @@ DWORD WINAPI receiveMessages(LPVOID lpParam)
 
             if (iResult > 0)
             {
-                printf("Received from previous instance\n");
-
                 Message message = *(Message*)receiveMessagesThreadData.buffer;
+
+                EnterCriticalSection(&ConsoleAccess);
+                printf("==========================================\n");
+                printf("Received from previous instance\n");
                 printf("[%s]: %d\n", message.isImportant ? "IMPORTANT" : "STANDARD", message.value);
+                LeaveCriticalSection(&ConsoleAccess);
 
                 if (message.isImportant)
                 {
@@ -441,7 +448,7 @@ DWORD WINAPI sendImportant(LPVOID lpParam)
     ThreadData sendImportantThreadData = *(ThreadData*)lpParam;
 
     while (WaitForSingleObject(ImportantBufferFull, INFINITE) == WAIT_OBJECT_0)
-    {   
+    {
         EnterCriticalSection(&ImportantBufferAccess);
 
         Message message = getMessageFromBuffer(&ImportantBuffer);
@@ -449,6 +456,12 @@ DWORD WINAPI sendImportant(LPVOID lpParam)
         LeaveCriticalSection(&ImportantBufferAccess);
 
         ReleaseSemaphore(ImportantBufferEmpty, 1, NULL);
+
+        EnterCriticalSection(&ConsoleAccess);
+        printf("==========================================\n");
+        printf("Forwarding IMPORTANT message to %s\n", sendImportantThreadData.instancePort == 5000 ? "DESTINATION" : "AGREGATOR");
+        printf("= %d\n", message.value);
+        LeaveCriticalSection(&ConsoleAccess);
 
         iResult = send(sendImportantThreadData.socket, (const char*)&message, sizeof(message), 0);
         if (iResult == SOCKET_ERROR)
@@ -458,9 +471,6 @@ DWORD WINAPI sendImportant(LPVOID lpParam)
             WSACleanup();
             return 1;
         }
-
-        printf("Forwarded to %s!\n", sendImportantThreadData.instancePort == 5000 ? "DESTINATION" : "AGREGATOR");
-        printf("==========================================\n");
     }
 
     return 0;
@@ -472,38 +482,55 @@ DWORD WINAPI sendStandard(LPVOID lpParam)
 
     while (WaitForSingleObject(StandardBufferFull, INFINITE) == WAIT_OBJECT_0)
     {
+        Sleep(3000); // Samo za testiranje 3s; posle promeniti u 1s
+
+        
+        EnterCriticalSection(&ConsoleAccess);
+        printf("==========================================\n");
+        printf("Forwarding STANDARD messages to %s\n", sendStandardThreadData.instancePort == 5000 ? "DESTINATION" : "AGREGATOR");
+
         EnterCriticalSection(&StandardBufferAccess);
 
-        Message message = getMessageFromBuffer(&StandardBuffer);
+        while (!isBufferEmpty(&StandardBuffer))
+        {
+            Message message = getMessageFromBuffer(&StandardBuffer);
+
+            printf("= %d\n", message.value);
+
+            iResult = send(sendStandardThreadData.socket, (const char*)&message, sizeof(message), 0);
+            if (iResult == SOCKET_ERROR)
+            {
+                printf("send failed with error: %d\n", WSAGetLastError());
+                closesocket(sendStandardThreadData.socket);
+                WSACleanup();
+                return 1;
+            }
+
+            ReleaseSemaphore(StandardBufferEmpty, 1, NULL);
+        }
 
         LeaveCriticalSection(&StandardBufferAccess);
 
-        ReleaseSemaphore(ImportantBufferEmpty, 1, NULL);
-
-        iResult = send(sendStandardThreadData.socket, (const char*)&message, sizeof(message), 0);
-        if (iResult == SOCKET_ERROR)
-        {
-            printf("send failed with error: %d\n", WSAGetLastError());
-            closesocket(sendStandardThreadData.socket);
-            WSACleanup();
-            return 1;
-        }
-
-        printf("Forwarded to %s!\n", sendStandardThreadData.instancePort == 5000 ? "DESTINATION" : "AGREGATOR");
-        printf("==========================================\n");
+        LeaveCriticalSection(&ConsoleAccess);
     }
     
     return 0;
 }
 
-Message getMessageFromBuffer(RingBuffer *buffer) {
+Message getMessageFromBuffer(RingBuffer *buffer)
+{
     int index;
     index = buffer->head;
     buffer->head = (buffer->head + 1) % RING_SIZE;
     return buffer->data[index];
 }
 
-void addMessageToBuffer(RingBuffer *buffer, Message message) {
+void addMessageToBuffer(RingBuffer *buffer, Message message)
+{
     buffer->data[buffer->tail] = message;
     buffer->tail = (buffer->tail + 1) % RING_SIZE;
+}
+
+bool isBufferEmpty(RingBuffer* buffer) {
+    return buffer->head == buffer->tail;
 }

@@ -1,58 +1,64 @@
 #include <ws2tcpip.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <WIndows.h>
+#include <Windows.h>
 #include <conio.h>
 
 #define DEFAULT_BUFLEN 512
 #define DEFAULT_PORT "5000"
 #define MAX_SOCKET_LIMIT 100
+#define RING_SIZE (16)
+
+#define SAFE_CLOSE_HANDLE(handle) if(handle) { CloseHandle(handle); }
 
 SOCKET acceptedSockets[MAX_SOCKET_LIMIT];
 int socketIndex = 0;
 
 // Variable used to store function return value
 int iResult;
-HANDLE importantSemaphore;
-HANDLE standardSemaphore;
-CRITICAL_SECTION csBufferImp;
-CRITICAL_SECTION csBufferStd;
 
 struct Message {
     int value;
     bool isImportant;
 };
-Message buffStandard[500 * sizeof(Message)];
-Message buffImportant[500 * sizeof(Message)];
-int countStd = 0;
-int countImp = 0;
 
-struct SocketAcceptorThreadData {
-    SOCKET listeningSocket;
+struct RingBuffer {
+    unsigned int tail;
+    unsigned int head;
+    Message data[RING_SIZE];
 };
 
-struct Structure
-{
-    SOCKET senderSocketStruct;
-    char recvbuf[DEFAULT_BUFLEN];
-    int nextInstancePortStruct;
-    Message* msg;
+struct ThreadData {
+    SOCKET socket;
+    char buffer[DEFAULT_BUFLEN];
+    int instancePort;
+    Message* message;
 };
-Structure recvStructInit;
+
+RingBuffer ImportantBuffer;
+RingBuffer StandardBuffer;
+
+CRITICAL_SECTION ImportantBufferAccess;
+CRITICAL_SECTION StandardBufferAccess;
+
+HANDLE ImportantBufferEmpty;
+HANDLE ImportantBufferFull;
+HANDLE StandardBufferEmpty;
+HANDLE StandardBufferFull;
+HANDLE FinishSignal;
 
 bool InitializeWindowsSockets();
 SOCKET InitializeAgregatorAsServer(int port);
 SOCKET InitializeAgregatorAsClient(int port);
-DWORD WINAPI socketAcceptor(LPVOID lpParam);
-DWORD WINAPI  recvMsg(LPVOID lpParam);
-DWORD WINAPI  sendImportant(LPVOID lpParam);
-DWORD WINAPI  sendStandard(LPVOID lpParam);
+DWORD WINAPI acceptSockets(LPVOID lpParam);
+DWORD WINAPI receiveMessages(LPVOID lpParam);
+DWORD WINAPI sendImportant(LPVOID lpParam);
+DWORD WINAPI sendStandard(LPVOID lpParam);
+Message getMessageFromBuffer(RingBuffer *buffer);
+void addMessageToBuffer(RingBuffer *buffer, Message message);
 
 int main(void)
 {
-    InitializeCriticalSection(&csBufferImp);
-    InitializeCriticalSection(&csBufferStd);
-
     int currentInstanceID;
     printf("Current instance ID (integer): ");
     scanf("%d", &currentInstanceID);
@@ -100,31 +106,54 @@ int main(void)
     // Buffer used for storing incoming data
     char recvbuf[DEFAULT_BUFLEN];
 
-    SocketAcceptorThreadData data;
-    data.listeningSocket = receiverSocket;
+    ThreadData acceptSocketsThreadData;
+    acceptSocketsThreadData.socket = receiverSocket;
 
     DWORD SocketAcceptorID;
-    HANDLE hSocketAcceptor = CreateThread(NULL, 0, &socketAcceptor, &data, 0, &SocketAcceptorID);
+    HANDLE hSocketAcceptor = CreateThread(NULL, 0, &acceptSockets, &acceptSocketsThreadData, 0, &SocketAcceptorID);
 
     printf("==========================================\n");
 
-    // Struct for recv thread
-    recvStructInit.senderSocketStruct = senderSocket;
-    recvStructInit.nextInstancePortStruct = nextInstancePort;
+    // Create all semaphores
+    ImportantBufferEmpty = CreateSemaphore(0, RING_SIZE, RING_SIZE, NULL);
+    ImportantBufferFull = CreateSemaphore(0, 0, RING_SIZE, NULL);
+    StandardBufferEmpty = CreateSemaphore(0, RING_SIZE, RING_SIZE, NULL);
+    StandardBufferFull = CreateSemaphore(0, 0, RING_SIZE, NULL);
+    FinishSignal = CreateSemaphore(0, 0, 2, NULL);
 
-    // Thread for recv
-    DWORD recvID, importantMsgId, standardMsgId;
-    HANDLE hrecv, hImportantMsg, hStandardMsg;
-    //PTP_POOL test;
-    //test = CreateThreadpool(hrecv);
+    // Create all threads
+    DWORD ReceiverID, ImportantSenderID, StandardSenderID;
+    HANDLE hReceiver, hImportantSender, hStandardSender;
 
-    importantSemaphore = CreateSemaphore(0, 0, 1, NULL);
-    standardSemaphore = CreateSemaphore(0, 0, 1, NULL);
+    if (ImportantBufferEmpty && ImportantBufferFull &&
+        StandardBufferEmpty && StandardBufferFull &&
+        FinishSignal)
+    {
+        InitializeCriticalSection(&ImportantBufferAccess);
+        InitializeCriticalSection(&StandardBufferAccess);
 
-    hrecv = CreateThread(NULL, 0, &recvMsg, &recvStructInit, 0, &recvID);
+        // Thread za primanje podataka sa prethodne instance
+        ThreadData receiveMessagesThreadData;
+        receiveMessagesThreadData.socket = receiverSocket;
+        hReceiver = CreateThread(NULL, 0, &receiveMessages, &receiveMessagesThreadData, 0, &ReceiverID);
 
-    hImportantMsg = CreateThread(NULL, 0, &sendImportant, &recvStructInit, 0, &importantMsgId);
-    hStandardMsg = CreateThread(NULL, 0, &sendStandard, &recvStructInit, 0, &standardMsgId);
+        // Thread za slanje hitnih poruka na sledecu instancu
+        ThreadData sendImportantThreadData;
+        sendImportantThreadData.socket = senderSocket;
+        sendImportantThreadData.instancePort = nextInstancePort;
+        hImportantSender = CreateThread(NULL, 0, &sendImportant, &sendImportantThreadData, 0, &ImportantSenderID);
+
+        // Thread za slanje standardnih poruka na sledecu instancu
+        ThreadData sendStandardThreadData;
+        sendStandardThreadData.socket = senderSocket;
+        sendStandardThreadData.instancePort = nextInstancePort;
+        hStandardSender = CreateThread(NULL, 0, &sendStandard, &sendStandardThreadData, 0, &StandardSenderID);
+    
+        if (!hReceiver || !hImportantSender || !hStandardSender)
+        {
+            ReleaseSemaphore(FinishSignal, 2, NULL);
+        }
+    }
 
     _getch();
 
@@ -142,18 +171,28 @@ int main(void)
     closesocket(receiverSocket);
     closesocket(senderSocket);
     closesocket(acceptedSocket);
-    closesocket(acceptedSockets[socketIndex]);
+    for (int i = 0; i < socketIndex; i++)
+    {
+        closesocket(acceptedSockets[i]);
+    }
 
-    DeleteCriticalSection(&csBufferImp);
-    DeleteCriticalSection(&csBufferStd);
+    SAFE_CLOSE_HANDLE(hReceiver);
+    SAFE_CLOSE_HANDLE(hImportantSender);
+    SAFE_CLOSE_HANDLE(hStandardSender);
+    SAFE_CLOSE_HANDLE(ImportantBufferEmpty);
+    SAFE_CLOSE_HANDLE(ImportantBufferFull);
+    SAFE_CLOSE_HANDLE(StandardBufferEmpty);
+    SAFE_CLOSE_HANDLE(StandardBufferFull);
+    SAFE_CLOSE_HANDLE(FinishSignal);
+
+    DeleteCriticalSection(&ImportantBufferAccess);
+    DeleteCriticalSection(&StandardBufferAccess);
 
     //CloseThreadpool(test);
     WSACleanup();
 
     return 0;
 }
-
-
 
 bool InitializeWindowsSockets()
 {
@@ -166,6 +205,7 @@ bool InitializeWindowsSockets()
     }
     return true;
 }
+
 SOCKET InitializeAgregatorAsServer(int port)
 {
     // Socket used for listening for new clients 
@@ -238,6 +278,7 @@ SOCKET InitializeAgregatorAsServer(int port)
 
     return listeningSocket;
 }
+
 SOCKET InitializeAgregatorAsClient(int port)
 {
     // Socket used to communicate with server
@@ -278,13 +319,14 @@ SOCKET InitializeAgregatorAsClient(int port)
 
     return connectSocket;
 }
-DWORD WINAPI socketAcceptor(LPVOID lpParam)
+
+DWORD WINAPI acceptSockets(LPVOID lpParam)
 {
-    SocketAcceptorThreadData* data = (SocketAcceptorThreadData*)lpParam;
+    ThreadData acceptSocketsThreadData = *(ThreadData*)lpParam;
 
     while (true)
     {
-        SOCKET acceptedSocket = accept(data->listeningSocket, NULL, NULL);
+        SOCKET acceptedSocket = accept(acceptSocketsThreadData.socket, NULL, NULL);
 
         if (acceptedSocket != INVALID_SOCKET)
         {
@@ -316,42 +358,43 @@ DWORD WINAPI socketAcceptor(LPVOID lpParam)
 
     return 0;
 }
-DWORD WINAPI  recvMsg(LPVOID lpParam)
+
+DWORD WINAPI receiveMessages(LPVOID lpParam)
 {
-    Structure recvStruct = *(Structure*)lpParam;
+    ThreadData receiveMessagesThreadData = *(ThreadData*)lpParam;
+
     while (true)
     {
         for (int i = 0; i < socketIndex; i++)
         {
-            iResult = recv(acceptedSockets[i], recvStruct.recvbuf, DEFAULT_BUFLEN, 0);
+            iResult = recv(acceptedSockets[i], receiveMessagesThreadData.buffer, DEFAULT_BUFLEN, 0);
 
             if (iResult > 0)
             {
-                // Poruka je primljena bez gresaka
                 printf("Received from previous instance\n");
 
-                Message* message = (Message*)recvStruct.recvbuf;
-                recvStruct.msg = message;
-                printf("[%s]: %d\n", message->isImportant ? "IMPORTANT" : "STANDARD", message->value);
+                Message message = *(Message*)receiveMessagesThreadData.buffer;
+                printf("[%s]: %d\n", message.isImportant ? "IMPORTANT" : "STANDARD", message.value);
 
-
-                if (message->isImportant)
+                if (message.isImportant)
                 {
-                    EnterCriticalSection(&csBufferImp);
-                    buffImportant[countImp].isImportant = true;
-                    buffImportant[countImp].value = message->value;
-                    ReleaseSemaphore(importantSemaphore, 1, NULL);     //upali semafor  importantSemaphore
-                    LeaveCriticalSection(&csBufferImp);
-                    countImp++;
+                    EnterCriticalSection(&ImportantBufferAccess);
+
+                    addMessageToBuffer(&ImportantBuffer, message);
+
+                    LeaveCriticalSection(&ImportantBufferAccess);
+
+                    ReleaseSemaphore(ImportantBufferFull, 1, NULL);
                 }
                 else
                 {
-                    EnterCriticalSection(&csBufferStd);
-                    buffStandard[countStd].isImportant = false;
-                    buffStandard[countStd].value = message->value;
-                    ReleaseSemaphore(standardSemaphore, 1, NULL);     //upali semafor  standardSemaphore
-                    LeaveCriticalSection(&csBufferStd);
-                    countStd++;
+                    EnterCriticalSection(&StandardBufferAccess);
+
+                    addMessageToBuffer(&StandardBuffer, message);
+
+                    LeaveCriticalSection(&StandardBufferAccess);
+
+                    ReleaseSemaphore(StandardBufferFull, 1, NULL);
                 }
             }
             else if (iResult == 0)
@@ -374,62 +417,78 @@ DWORD WINAPI  recvMsg(LPVOID lpParam)
             }
         }
     }
+
+    return 0;
 }
-DWORD WINAPI  sendImportant(LPVOID lpParam)
-{    
-    Structure recvStruct = *(Structure*)lpParam;
 
-    //wait for semaphore
-    while (WaitForSingleObject(importantSemaphore,INFINITE)== WAIT_OBJECT_0)
+DWORD WINAPI sendImportant(LPVOID lpParam)
+{
+    ThreadData sendImportantThreadData = *(ThreadData*)lpParam;
+
+    while (WaitForSingleObject(ImportantBufferFull, INFINITE) == WAIT_OBJECT_0)
     {   
-        // Send data to next instance
-        EnterCriticalSection(&csBufferImp);
-        Message msg = buffImportant[countImp];
+        EnterCriticalSection(&ImportantBufferAccess);
 
-        iResult = send(recvStruct.senderSocketStruct, (const char*)&msg, sizeof(msg), 0);
+        Message message = getMessageFromBuffer(&ImportantBuffer);
+
+        LeaveCriticalSection(&ImportantBufferAccess);
+
+        ReleaseSemaphore(ImportantBufferEmpty, 1, NULL);
+
+        iResult = send(sendImportantThreadData.socket, (const char*)&message, sizeof(message), 0);
         if (iResult == SOCKET_ERROR)
         {
             printf("send failed with error: %d\n", WSAGetLastError());
-            closesocket(recvStruct.senderSocketStruct);
+            closesocket(sendImportantThreadData.socket);
             WSACleanup();
             return 1;
         }
 
-        printf("Forwarded to %s!\n", recvStruct.nextInstancePortStruct == 5000 ? "DESTINATION" : "AGREGATOR");
+        printf("Forwarded to %s!\n", sendImportantThreadData.instancePort == 5000 ? "DESTINATION" : "AGREGATOR");
         printf("==========================================\n");
+    }
 
-        countImp--;
-        LeaveCriticalSection(&csBufferImp);
-    }    
+    return 0;
 }
-DWORD WINAPI  sendStandard(LPVOID lpParam)
-{    
-    Structure recvStruct = *(Structure*)lpParam;
 
-    //wait for semaphore
-    while (WaitForSingleObject(standardSemaphore, INFINITE) == WAIT_OBJECT_0)
+DWORD WINAPI sendStandard(LPVOID lpParam)
+{
+    ThreadData sendStandardThreadData = *(ThreadData*)lpParam;
+
+    while (WaitForSingleObject(StandardBufferFull, INFINITE) == WAIT_OBJECT_0)
     {
-        // Send data to next instance
-        EnterCriticalSection(&csBufferStd);
-        for (int i = 0; i < countStd; i++) 
+        EnterCriticalSection(&StandardBufferAccess);
+
+        Message message = getMessageFromBuffer(&StandardBuffer);
+
+        LeaveCriticalSection(&StandardBufferAccess);
+
+        ReleaseSemaphore(ImportantBufferEmpty, 1, NULL);
+
+        iResult = send(sendStandardThreadData.socket, (const char*)&message, sizeof(message), 0);
+        if (iResult == SOCKET_ERROR)
         {
-            Message msg = buffStandard[i];
-            iResult = send(recvStruct.senderSocketStruct, (const char*)&msg, sizeof(msg), 0);
+            printf("send failed with error: %d\n", WSAGetLastError());
+            closesocket(sendStandardThreadData.socket);
+            WSACleanup();
+            return 1;
+        }
 
-            if (iResult == SOCKET_ERROR)
-            {
-                printf("send failed with error: %d\n", WSAGetLastError());
-                closesocket(recvStruct.senderSocketStruct);
-                WSACleanup();
-                return 1;
-            }
-
-            printf("Forwarded to %s!\n", recvStruct.nextInstancePortStruct == 5000 ? "DESTINATION" : "AGREGATOR");
-            printf("==========================================\n");            
-        }    
-        countStd = 0;
-        LeaveCriticalSection(&csBufferStd);
-        Sleep(1000);
+        printf("Forwarded to %s!\n", sendStandardThreadData.instancePort == 5000 ? "DESTINATION" : "AGREGATOR");
+        printf("==========================================\n");
     }
     
+    return 0;
+}
+
+Message getMessageFromBuffer(RingBuffer *buffer) {
+    int index;
+    index = buffer->head;
+    buffer->head = (buffer->head + 1) % RING_SIZE;
+    return buffer->data[index];
+}
+
+void addMessageToBuffer(RingBuffer *buffer, Message message) {
+    buffer->data[buffer->tail] = message;
+    buffer->tail = (buffer->tail + 1) % RING_SIZE;
 }

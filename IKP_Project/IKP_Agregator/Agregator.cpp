@@ -153,6 +153,21 @@ int main(void)
         {
             ReleaseSemaphore(FinishSignal, 2, NULL);
         }
+
+        if (hReceiver)
+        {
+            WaitForSingleObject(hReceiver, INFINITE);
+        }
+
+        if (hImportantSender)
+        {
+            WaitForSingleObject(hImportantSender, INFINITE);
+        }
+
+        if (hStandardSender)
+        {
+            WaitForSingleObject(hStandardSender, INFINITE);
+        }
     }
 
     _getch();

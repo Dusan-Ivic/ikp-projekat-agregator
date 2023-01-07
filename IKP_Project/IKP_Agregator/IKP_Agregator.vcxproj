@@ -79,6 +79,10 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Agregator.cpp" />
+    <ClCompile Include="RingBuffer\RingBuffer.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="RingBuffer\RingBuffer.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

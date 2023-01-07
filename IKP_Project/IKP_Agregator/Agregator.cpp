@@ -3,11 +3,11 @@
 #include <stdio.h>
 #include <Windows.h>
 #include <conio.h>
+#include "RingBuffer/RingBuffer.h"
 
 #define DEFAULT_BUFLEN 512
 #define DEFAULT_PORT "5000"
 #define MAX_SOCKET_LIMIT 100
-#define RING_SIZE (16)
 
 #define SAFE_CLOSE_HANDLE(handle) if(handle) { CloseHandle(handle); }
 
@@ -16,17 +16,6 @@ int socketIndex = 0;
 
 // Variable used to store function return value
 int iResult;
-
-struct Message {
-    int value;
-    bool isImportant;
-};
-
-struct RingBuffer {
-    unsigned int tail;
-    unsigned int head;
-    Message data[RING_SIZE];
-};
 
 struct ThreadData {
     SOCKET socket;
@@ -55,9 +44,6 @@ DWORD WINAPI acceptSockets(LPVOID lpParam);
 DWORD WINAPI receiveMessages(LPVOID lpParam);
 DWORD WINAPI sendImportant(LPVOID lpParam);
 DWORD WINAPI sendStandard(LPVOID lpParam);
-Message getMessageFromBuffer(RingBuffer *buffer);
-void addMessageToBuffer(RingBuffer *buffer, Message message);
-bool isBufferEmpty(RingBuffer* buffer);
 
 int main(void)
 {
@@ -525,25 +511,4 @@ DWORD WINAPI sendStandard(LPVOID lpParam)
     }
     
     return 0;
-}
-
-// TODO - Funkcije vezane za upravljanje bufferom
-// prebaciti u zasebne fajlove, .hpp i .cpp
-
-Message getMessageFromBuffer(RingBuffer *buffer)
-{
-    int index;
-    index = buffer->head;
-    buffer->head = (buffer->head + 1) % RING_SIZE;
-    return buffer->data[index];
-}
-
-void addMessageToBuffer(RingBuffer *buffer, Message message)
-{
-    buffer->data[buffer->tail] = message;
-    buffer->tail = (buffer->tail + 1) % RING_SIZE;
-}
-
-bool isBufferEmpty(RingBuffer* buffer) {
-    return buffer->head == buffer->tail;
 }

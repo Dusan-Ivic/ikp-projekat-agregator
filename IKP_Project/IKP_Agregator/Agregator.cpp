@@ -390,6 +390,11 @@ DWORD WINAPI receiveMessages(LPVOID lpParam)
 
             if (iResult > 0)
             {
+                // TODO - Naredni deo koda (unutar iResult > 0)
+                // obraditi u novoj niti preko processMessage funkcije
+                // u nit kao parametar poslati receiveMessagesThreadData zbog citanja buffera
+                // Nit ce aktivirati jedan od dva semafora da bi se pokrenulo slanje
+
                 Message message = *(Message*)receiveMessagesThreadData.buffer;
 
                 EnterCriticalSection(&ConsoleAccess);
@@ -447,6 +452,9 @@ DWORD WINAPI sendImportant(LPVOID lpParam)
 {
     ThreadData sendImportantThreadData = *(ThreadData*)lpParam;
 
+    // TODO - Umesto WaitForSingleObject implementirati WaitForMultipleObjects
+    // da bi se pored ImportantBufferFull mogao signalizirati i FinishSignal semafor
+
     while (WaitForSingleObject(ImportantBufferFull, INFINITE) == WAIT_OBJECT_0)
     {
         EnterCriticalSection(&ImportantBufferAccess);
@@ -480,10 +488,12 @@ DWORD WINAPI sendStandard(LPVOID lpParam)
 {
     ThreadData sendStandardThreadData = *(ThreadData*)lpParam;
 
+    // TODO - Umesto WaitForSingleObject implementirati WaitForMultipleObjects
+    // da bi se pored StandardBufferFull mogao signalizirati i FinishSignal semafor
+
     while (WaitForSingleObject(StandardBufferFull, INFINITE) == WAIT_OBJECT_0)
     {
         Sleep(3000); // Samo za testiranje 3s; posle promeniti u 1s
-
         
         EnterCriticalSection(&ConsoleAccess);
         printf("==========================================\n");
@@ -516,6 +526,9 @@ DWORD WINAPI sendStandard(LPVOID lpParam)
     
     return 0;
 }
+
+// TODO - Funkcije vezane za upravljanje bufferom
+// prebaciti u zasebne fajlove, .hpp i .cpp
 
 Message getMessageFromBuffer(RingBuffer *buffer)
 {

@@ -1,10 +1,13 @@
 #include <ws2tcpip.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <conio.h>
 
 #define DEFAULT_BUFLEN 512
 #define DEFAULT_PORT "5000"
 #define MAX_SOCKET_LIMIT 100
+
+#define SAFE_CLOSE_HANDLE(handle) if(handle) { CloseHandle(handle); }
 
 SOCKET acceptedSockets[MAX_SOCKET_LIMIT];
 int socketIndex = 0;
@@ -19,12 +22,18 @@ struct Message {
     bool isImportant;
 };
 
-struct SocketAcceptorThreadData {
-    SOCKET listeningSocket;
+struct ThreadData {
+    SOCKET socket;
+    char buffer[DEFAULT_BUFLEN];
+    int instancePort;
+    Message* message;
 };
 
+HANDLE FinishSignal;
+
 bool InitializeWindowsSockets();
-DWORD WINAPI socketAcceptor(LPVOID lpParam);
+DWORD WINAPI acceptSockets(LPVOID lpParam);
+DWORD WINAPI receiveMessages(LPVOID lpParam);
 
 int main(void) 
 {
@@ -33,9 +42,6 @@ int main(void)
 
     // Socket used for connecting to new client
     SOCKET acceptedSocket = INVALID_SOCKET;
-
-    // Buffer used for storing incoming data
-    char recvbuf[DEFAULT_BUFLEN];
 
     if (InitializeWindowsSockets() == false)
     {
@@ -98,55 +104,44 @@ int main(void)
     }
 
 	printf("Server initialized, waiting for clients...\n");
-    
-    SocketAcceptorThreadData data;
-    data.listeningSocket = listeningSocket;
-
-    DWORD SocketAcceptorID;
-    HANDLE hSocketAcceptor = CreateThread(NULL, 0, &socketAcceptor, &data, 0, &SocketAcceptorID);
-
     printf("==========================================\n");
 
-    // Main program loop
-    while (true)
+    // Create all semaphores
+    FinishSignal = CreateSemaphore(0, 0, 2, NULL);
+
+    // Create all threads
+    DWORD SocketAcceptorID, ReceiverID;
+    HANDLE hSocketAcceptor, hReceiver;
+
+    if (FinishSignal)
     {
-        for (int i = 0; i < socketIndex; i++)
+        // Thread za prihvatanje socketa
+        ThreadData acceptSocketsThreadData;
+        acceptSocketsThreadData.socket = listeningSocket;
+        hSocketAcceptor = CreateThread(NULL, 0, &acceptSockets, &acceptSocketsThreadData, 0, &SocketAcceptorID);
+
+        // Thread za primanje podataka sa prethodne instance
+        ThreadData receiveMessagesThreadData;
+        receiveMessagesThreadData.socket = listeningSocket;
+        hReceiver = CreateThread(NULL, 0, &receiveMessages, &receiveMessagesThreadData, 0, &ReceiverID);
+
+        if (!hSocketAcceptor || !hReceiver)
         {
-            iResult = recv(acceptedSockets[i], recvbuf, DEFAULT_BUFLEN, 0);
+            ReleaseSemaphore(FinishSignal, 2, NULL);
+        }
 
-            if (iResult > 0)
-            {
-                // Poruka je primljena bez gresaka
+        if (hSocketAcceptor)
+        {
+            WaitForSingleObject(hSocketAcceptor, INFINITE);
+        }
 
-                printf("Received from previous instance\n");
-
-                Message* message = (Message *)recvbuf;
-                totalSum += message->value;
-
-                printf("[%s]: %d\n", message->isImportant ? "IMPORTANT" : "STANDARD", message->value);
-                printf("Total count: %d\n", totalSum);
-                printf("==========================================\n");
-            }
-            else if (iResult == 0)
-            {
-                printf("Connection with previous instance closed.\n");
-                closesocket(acceptedSockets[i]);
-                continue;
-            }
-            else
-            {
-                if (WSAGetLastError() == WSAEWOULDBLOCK)
-                {
-
-                }
-                else
-                {
-                    closesocket(acceptedSockets[i]);
-                    continue;
-                }
-            }
+        if (hReceiver)
+        {
+            WaitForSingleObject(hReceiver, INFINITE);
         }
     }
+
+    _getch();
 
     // Shut down the connection
     iResult = shutdown(acceptedSocket, SD_SEND);
@@ -164,6 +159,10 @@ int main(void)
     for (int i = 0; i < socketIndex; i++) {
         closesocket(acceptedSockets[i]);
     }
+
+    SAFE_CLOSE_HANDLE(hSocketAcceptor);
+    SAFE_CLOSE_HANDLE(hReceiver);
+    SAFE_CLOSE_HANDLE(FinishSignal);
 
     WSACleanup();
 
@@ -184,13 +183,13 @@ bool InitializeWindowsSockets()
 	return true;
 }
 
-DWORD WINAPI socketAcceptor(LPVOID lpParam)
+DWORD WINAPI acceptSockets(LPVOID lpParam)
 {
-    SocketAcceptorThreadData* data = (SocketAcceptorThreadData *)lpParam;
+    ThreadData acceptSocketsThreadData = *(ThreadData*)lpParam;
 
     while (true)
     {
-        SOCKET acceptedSocket = accept(data->listeningSocket, NULL, NULL);
+        SOCKET acceptedSocket = accept(acceptSocketsThreadData.socket, NULL, NULL);
 
         if (acceptedSocket != INVALID_SOCKET)
         {
@@ -216,6 +215,53 @@ DWORD WINAPI socketAcceptor(LPVOID lpParam)
             {
                 printf("accept failed with error: %d\n", WSAGetLastError());
                 continue;
+            }
+        }
+    }
+
+    return 0;
+}
+
+DWORD WINAPI receiveMessages(LPVOID lpParam)
+{
+    ThreadData receiveMessagesThreadData = *(ThreadData*)lpParam;
+
+    while (true)
+    {
+        for (int i = 0; i < socketIndex; i++)
+        {
+            iResult = recv(acceptedSockets[i], receiveMessagesThreadData.buffer, DEFAULT_BUFLEN, 0);
+
+            if (iResult > 0)
+            {
+                // Poruka je primljena bez gresaka
+
+                printf("Received from previous instance\n");
+
+                Message* message = (Message *)receiveMessagesThreadData.buffer;
+                totalSum += message->value;
+
+                printf("[%s]: %d\n", message->isImportant ? "IMPORTANT" : "STANDARD", message->value);
+                printf("Total count: %d\n", totalSum);
+                printf("==========================================\n");
+            }
+            else if (iResult == 0)
+            {
+                printf("Connection with previous instance closed.\n");
+                closesocket(acceptedSockets[i]);
+                continue;
+            }
+            else
+            {
+                if (WSAGetLastError() == WSAEWOULDBLOCK)
+                {
+
+                }
+                else
+                {
+                    closesocket(acceptedSockets[i]);
+                    continue;
+                }
             }
         }
     }

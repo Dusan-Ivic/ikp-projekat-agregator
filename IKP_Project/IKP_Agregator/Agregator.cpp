@@ -94,12 +94,6 @@ int main(void)
     // Buffer used for storing incoming data
     char recvbuf[DEFAULT_BUFLEN];
 
-    ThreadData acceptSocketsThreadData;
-    acceptSocketsThreadData.socket = receiverSocket;
-
-    DWORD SocketAcceptorID;
-    HANDLE hSocketAcceptor = CreateThread(NULL, 0, &acceptSockets, &acceptSocketsThreadData, 0, &SocketAcceptorID);
-
     printf("==========================================\n");
 
     // Create all semaphores
@@ -107,11 +101,11 @@ int main(void)
     ImportantBufferFull = CreateSemaphore(0, 0, RING_SIZE, NULL);
     StandardBufferEmpty = CreateSemaphore(0, RING_SIZE, RING_SIZE, NULL);
     StandardBufferFull = CreateSemaphore(0, 0, RING_SIZE, NULL);
-    FinishSignal = CreateSemaphore(0, 0, 2, NULL);
+    FinishSignal = CreateSemaphore(0, 0, 4, NULL);
 
     // Create all threads
-    DWORD ReceiverID, ImportantSenderID, StandardSenderID;
-    HANDLE hReceiver, hImportantSender, hStandardSender;
+    DWORD SocketAcceptorID, ReceiverID, ImportantSenderID, StandardSenderID;
+    HANDLE hSocketAcceptor, hReceiver, hImportantSender, hStandardSender;
 
     if (ImportantBufferEmpty && ImportantBufferFull &&
         StandardBufferEmpty && StandardBufferFull &&
@@ -120,6 +114,11 @@ int main(void)
         InitializeCriticalSection(&ImportantBufferAccess);
         InitializeCriticalSection(&StandardBufferAccess);
         InitializeCriticalSection(&ConsoleAccess);
+
+        // Thread za prihvatanje socketa
+        ThreadData acceptSocketsThreadData;
+        acceptSocketsThreadData.socket = receiverSocket;
+        hSocketAcceptor = CreateThread(NULL, 0, &acceptSockets, &acceptSocketsThreadData, 0, &SocketAcceptorID);
 
         // Thread za primanje podataka sa prethodne instance
         ThreadData receiveMessagesThreadData;
@@ -138,9 +137,14 @@ int main(void)
         sendStandardThreadData.instancePort = nextInstancePort;
         hStandardSender = CreateThread(NULL, 0, &sendStandard, &sendStandardThreadData, 0, &StandardSenderID);
     
-        if (!hReceiver || !hImportantSender || !hStandardSender)
+        if (!hSocketAcceptor || !hReceiver || !hImportantSender || !hStandardSender)
         {
-            ReleaseSemaphore(FinishSignal, 2, NULL);
+            ReleaseSemaphore(FinishSignal, 4, NULL);
+        }
+
+        if (hSocketAcceptor)
+        {
+            WaitForSingleObject(hSocketAcceptor, INFINITE);
         }
 
         if (hReceiver)
@@ -180,6 +184,7 @@ int main(void)
         closesocket(acceptedSockets[i]);
     }
 
+    SAFE_CLOSE_HANDLE(hSocketAcceptor);
     SAFE_CLOSE_HANDLE(hReceiver);
     SAFE_CLOSE_HANDLE(hImportantSender);
     SAFE_CLOSE_HANDLE(hStandardSender);
@@ -438,10 +443,10 @@ DWORD WINAPI sendImportant(LPVOID lpParam)
 {
     ThreadData sendImportantThreadData = *(ThreadData*)lpParam;
 
-    // TODO - Umesto WaitForSingleObject implementirati WaitForMultipleObjects
-    // da bi se pored ImportantBufferFull mogao signalizirati i FinishSignal semafor
+    const int semaphoreNum = 2;
+    HANDLE semaphores[semaphoreNum] = { FinishSignal, ImportantBufferFull };
 
-    while (WaitForSingleObject(ImportantBufferFull, INFINITE) == WAIT_OBJECT_0)
+    while (WaitForMultipleObjects(semaphoreNum, semaphores, FALSE, INFINITE) == WAIT_OBJECT_0 + 1)
     {
         EnterCriticalSection(&ImportantBufferAccess);
 
@@ -449,7 +454,7 @@ DWORD WINAPI sendImportant(LPVOID lpParam)
 
         LeaveCriticalSection(&ImportantBufferAccess);
 
-        ReleaseSemaphore(ImportantBufferEmpty, 1, NULL);
+        //ReleaseSemaphore(ImportantBufferEmpty, 1, NULL);
 
         EnterCriticalSection(&ConsoleAccess);
         printf("==========================================\n");
@@ -474,13 +479,13 @@ DWORD WINAPI sendStandard(LPVOID lpParam)
 {
     ThreadData sendStandardThreadData = *(ThreadData*)lpParam;
 
-    // TODO - Umesto WaitForSingleObject implementirati WaitForMultipleObjects
-    // da bi se pored StandardBufferFull mogao signalizirati i FinishSignal semafor
+    const int semaphoreNum = 2;
+    HANDLE semaphores[semaphoreNum] = { FinishSignal, StandardBufferFull };
 
-    while (WaitForSingleObject(StandardBufferFull, INFINITE) == WAIT_OBJECT_0)
+    while (WaitForMultipleObjects(semaphoreNum, semaphores, FALSE, INFINITE) == WAIT_OBJECT_0 + 1)
     {
         Sleep(3000); // Samo za testiranje 3s; posle promeniti u 1s
-        
+
         EnterCriticalSection(&ConsoleAccess);
         printf("==========================================\n");
         printf("Forwarding STANDARD messages to %s\n", sendStandardThreadData.instancePort == 5000 ? "DESTINATION" : "AGREGATOR");
@@ -502,7 +507,7 @@ DWORD WINAPI sendStandard(LPVOID lpParam)
                 return 1;
             }
 
-            ReleaseSemaphore(StandardBufferEmpty, 1, NULL);
+            //ReleaseSemaphore(StandardBufferEmpty, 1, NULL);
         }
 
         LeaveCriticalSection(&StandardBufferAccess);

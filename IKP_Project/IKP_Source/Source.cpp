@@ -11,6 +11,8 @@
 #define DEFAULT_BUFLEN 512
 #define DEFAULT_PORT 5000
 
+#define SAFE_CLOSE_HANDLE(handle) if(handle) { CloseHandle(handle); }
+
 // Variable used to store function return value
 int iResult;
 
@@ -19,7 +21,17 @@ struct Message {
     bool isImportant;
 };
 
+struct ThreadData {
+    SOCKET socket;
+    char buffer[DEFAULT_BUFLEN];
+    int instancePort;
+    Message* message;
+};
+
+HANDLE FinishSignal;
+
 bool InitializeWindowsSockets();
+DWORD WINAPI sendMessages(LPVOID lpParam);
 
 int __cdecl main(int argc, char **argv) 
 {
@@ -84,34 +96,41 @@ int __cdecl main(int argc, char **argv)
     }
 
     printf("Source connected to next instance!\n");
-
     printf("==========================================\n");
 
-    while (true)
-    {
-        Message message;
-        message.value = (rand() % 100) + 1;  // Random number from 1 to 100
-        message.isImportant = rand() & 1;    // Random boolean value
+    // Create all semaphores
+    FinishSignal = CreateSemaphore(0, 0, 1, NULL);
 
-        // Send data to server
-        iResult = send(connectSocket, (const char*)&message, sizeof(message), 0);
-        if (iResult == SOCKET_ERROR)
+    // Create all threads
+    DWORD SenderID;
+    HANDLE hSender;
+
+    if (FinishSignal)
+    {
+        // Thread za slanje poruka na sledecu instancu
+        ThreadData sendMessagesThreadData;
+        sendMessagesThreadData.socket = connectSocket;
+        sendMessagesThreadData.instancePort = nextInstancePort;
+        hSender = CreateThread(NULL, 0, &sendMessages, &sendMessagesThreadData, 0, &SenderID);
+
+        if (!hSender)
         {
-            printf("send failed with error: %d\n", WSAGetLastError());
-            closesocket(connectSocket);
-            WSACleanup();
-            return 1;
+            ReleaseSemaphore(FinishSignal, 1, NULL);
         }
 
-        printf("Sent to %s!\n", nextInstancePort == 5000 ? "DESTINATION" : "AGREGATOR");
-        printf("[%s]: %d\n", message.isImportant ? "IMPORTANT" : "STANDARD", message.value);
-        printf("==========================================\n");
-
-        Sleep(1000); // Testiranje
+        if (hSender)
+        {
+            WaitForSingleObject(hSender, INFINITE);
+        }
     }
+
+    _getch();
 
     // Cleanup
     closesocket(connectSocket);
+
+    SAFE_CLOSE_HANDLE(hSender);
+    SAFE_CLOSE_HANDLE(FinishSignal);
 
     WSACleanup();
 
@@ -130,4 +149,34 @@ bool InitializeWindowsSockets()
     }
 
 	return true;
+}
+
+DWORD WINAPI sendMessages(LPVOID lpParam)
+{
+    ThreadData sendMessagesThreadData = *(ThreadData*)lpParam;
+    
+    while (true)
+    {
+        Message message;
+        message.value = (rand() % 100) + 1;  // Random number from 1 to 100
+        message.isImportant = rand() & 1;    // Random boolean value
+
+        // Send data to server
+        iResult = send(sendMessagesThreadData.socket, (const char*)&message, sizeof(message), 0);
+        if (iResult == SOCKET_ERROR)
+        {
+            printf("send failed with error: %d\n", WSAGetLastError());
+            closesocket(sendMessagesThreadData.socket);
+            WSACleanup();
+            return 1;
+        }
+
+        printf("Sent to %s!\n", sendMessagesThreadData.instancePort == 5000 ? "DESTINATION" : "AGREGATOR");
+        printf("[%s]: %d\n", message.isImportant ? "IMPORTANT" : "STANDARD", message.value);
+        printf("==========================================\n");
+
+        Sleep(1000); // Testiranje
+    }
+
+    return 0;
 }

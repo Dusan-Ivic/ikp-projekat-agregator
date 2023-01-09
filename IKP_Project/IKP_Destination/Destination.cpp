@@ -31,6 +31,8 @@ struct ThreadData {
 
 HANDLE FinishSignal;
 
+CRITICAL_SECTION TotalSumAccess;
+
 bool InitializeWindowsSockets();
 DWORD WINAPI acceptSockets(LPVOID lpParam);
 DWORD WINAPI receiveMessages(LPVOID lpParam);
@@ -115,6 +117,8 @@ int main(void)
 
     if (FinishSignal)
     {
+        InitializeCriticalSection(&TotalSumAccess);
+
         // Thread za prihvatanje socketa
         ThreadData acceptSocketsThreadData;
         acceptSocketsThreadData.socket = listeningSocket;
@@ -163,6 +167,8 @@ int main(void)
     SAFE_CLOSE_HANDLE(hSocketAcceptor);
     SAFE_CLOSE_HANDLE(hReceiver);
     SAFE_CLOSE_HANDLE(FinishSignal);
+
+    DeleteCriticalSection(&TotalSumAccess);
 
     WSACleanup();
 
@@ -239,10 +245,16 @@ DWORD WINAPI receiveMessages(LPVOID lpParam)
                 printf("Received from previous instance\n");
 
                 Message* message = (Message *)receiveMessagesThreadData.buffer;
-                totalSum += message->value;
 
                 printf("[%s]: %d\n", message->isImportant ? "IMPORTANT" : "STANDARD", message->value);
+
+                EnterCriticalSection(&TotalSumAccess);
+
+                totalSum += message->value;
                 printf("Total count: %d\n", totalSum);
+
+                LeaveCriticalSection(&TotalSumAccess);
+
                 printf("==========================================\n");
             }
             else if (iResult == 0)

@@ -486,19 +486,28 @@ DWORD WINAPI sendStandard(LPVOID lpParam)
     {
         Sleep(3000); // Samo za testiranje 3s; posle promeniti u 1s
 
+        Message messages[RING_SIZE];
+        int messageCount = 0;
+
+        EnterCriticalSection(&StandardBufferAccess);
+
+        getMessagesFromBuffer(&StandardBuffer, messages, &messageCount);
+
+        LeaveCriticalSection(&StandardBufferAccess);
+
         EnterCriticalSection(&ConsoleAccess);
         printf("==========================================\n");
         printf("Forwarding STANDARD messages to %s\n", sendStandardThreadData.instancePort == 5000 ? "DESTINATION" : "AGREGATOR");
 
-        EnterCriticalSection(&StandardBufferAccess);
+        printf("COUNT = %d\n", messageCount); // Za testiranje
 
-        while (!isBufferEmpty(&StandardBuffer))
+        for (int i = 0; i < messageCount; i++)
         {
-            Message message = getMessageFromBuffer(&StandardBuffer);
+            Message msg = messages[i];
 
-            printf("= %d\n", message.value);
+            printf("= %d\n", msg.value);
 
-            iResult = send(sendStandardThreadData.socket, (const char*)&message, sizeof(message), 0);
+            iResult = send(sendStandardThreadData.socket, (const char*)&msg, sizeof(Message), 0);
             if (iResult == SOCKET_ERROR)
             {
                 printf("send failed with error: %d\n", WSAGetLastError());
@@ -506,11 +515,7 @@ DWORD WINAPI sendStandard(LPVOID lpParam)
                 WSACleanup();
                 return 1;
             }
-
-            //ReleaseSemaphore(StandardBufferEmpty, 1, NULL);
         }
-
-        LeaveCriticalSection(&StandardBufferAccess);
 
         LeaveCriticalSection(&ConsoleAccess);
     }

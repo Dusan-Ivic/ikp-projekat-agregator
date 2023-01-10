@@ -17,3 +17,18 @@ void addMessageToBuffer(RingBuffer *buffer, Message message)
 bool isBufferEmpty(RingBuffer* buffer) {
     return buffer->head == buffer->tail;
 }
+
+void getMessagesFromBuffer(RingBuffer *buffer, Message messages[], int* messageCount)
+{
+    int index = 0;
+    while (!isBufferEmpty(buffer))
+    {
+        Message message = getMessageFromBuffer(buffer);
+        if (message.value > 0)
+        {
+            messages[index] = message;
+            (*messageCount)++;
+            index++;
+        }
+    }
+}

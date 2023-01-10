@@ -18,3 +18,5 @@ Message getMessageFromBuffer(RingBuffer *buffer);
 void addMessageToBuffer(RingBuffer *buffer, Message message);
 
 bool isBufferEmpty(RingBuffer* buffer);
+
+void getMessagesFromBuffer(RingBuffer *buffer, Message messages[], int* messageCount);

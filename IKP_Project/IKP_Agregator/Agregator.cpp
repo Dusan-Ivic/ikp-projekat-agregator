@@ -11,9 +11,6 @@
 
 #define SAFE_CLOSE_HANDLE(handle) if(handle) { CloseHandle(handle); }
 
-SOCKET acceptedSockets[MAX_SOCKET_LIMIT];
-int socketIndex = 0;
-
 // Variable used to store function return value
 int iResult;
 
@@ -36,6 +33,9 @@ HANDLE ImportantBufferFull;
 HANDLE StandardBufferEmpty;
 HANDLE StandardBufferFull;
 HANDLE FinishSignal;
+
+int recvIndex = 0;
+HANDLE hReceivers[MAX_SOCKET_LIMIT];
 
 bool InitializeWindowsSockets();
 SOCKET InitializeAgregatorAsServer(int port);
@@ -104,8 +104,8 @@ int main(void)
     FinishSignal = CreateSemaphore(0, 0, 4, NULL);
 
     // Create all threads
-    DWORD SocketAcceptorID, ReceiverID, ImportantSenderID, StandardSenderID;
-    HANDLE hSocketAcceptor, hReceiver, hImportantSender, hStandardSender;
+    DWORD SocketAcceptorID, ImportantSenderID, StandardSenderID;
+    HANDLE hSocketAcceptor, hImportantSender, hStandardSender;
 
     if (ImportantBufferEmpty && ImportantBufferFull &&
         StandardBufferEmpty && StandardBufferFull &&
@@ -120,11 +120,6 @@ int main(void)
         acceptSocketsThreadData.socket = receiverSocket;
         hSocketAcceptor = CreateThread(NULL, 0, &acceptSockets, &acceptSocketsThreadData, 0, &SocketAcceptorID);
 
-        // Thread za primanje podataka sa prethodne instance
-        ThreadData receiveMessagesThreadData;
-        receiveMessagesThreadData.socket = receiverSocket;
-        hReceiver = CreateThread(NULL, 0, &receiveMessages, &receiveMessagesThreadData, 0, &ReceiverID);
-
         // Thread za slanje hitnih poruka na sledecu instancu
         ThreadData sendImportantThreadData;
         sendImportantThreadData.socket = senderSocket;
@@ -137,7 +132,7 @@ int main(void)
         sendStandardThreadData.instancePort = nextInstancePort;
         hStandardSender = CreateThread(NULL, 0, &sendStandard, &sendStandardThreadData, 0, &StandardSenderID);
     
-        if (!hSocketAcceptor || !hReceiver || !hImportantSender || !hStandardSender)
+        if (!hSocketAcceptor || !hImportantSender || !hStandardSender)
         {
             ReleaseSemaphore(FinishSignal, 4, NULL);
         }
@@ -145,11 +140,6 @@ int main(void)
         if (hSocketAcceptor)
         {
             WaitForSingleObject(hSocketAcceptor, INFINITE);
-        }
-
-        if (hReceiver)
-        {
-            WaitForSingleObject(hReceiver, INFINITE);
         }
 
         if (hImportantSender)
@@ -179,13 +169,8 @@ int main(void)
     closesocket(receiverSocket);
     closesocket(senderSocket);
     closesocket(acceptedSocket);
-    for (int i = 0; i < socketIndex; i++)
-    {
-        closesocket(acceptedSockets[i]);
-    }
 
     SAFE_CLOSE_HANDLE(hSocketAcceptor);
-    SAFE_CLOSE_HANDLE(hReceiver);
     SAFE_CLOSE_HANDLE(hImportantSender);
     SAFE_CLOSE_HANDLE(hStandardSender);
     SAFE_CLOSE_HANDLE(ImportantBufferEmpty);
@@ -193,6 +178,9 @@ int main(void)
     SAFE_CLOSE_HANDLE(StandardBufferEmpty);
     SAFE_CLOSE_HANDLE(StandardBufferFull);
     SAFE_CLOSE_HANDLE(FinishSignal);
+    for (int i = 0; i < recvIndex; i++) {
+        SAFE_CLOSE_HANDLE(hReceivers[i]);
+    }
 
     DeleteCriticalSection(&ImportantBufferAccess);
     DeleteCriticalSection(&StandardBufferAccess);
@@ -340,17 +328,13 @@ DWORD WINAPI acceptSockets(LPVOID lpParam)
 
         if (acceptedSocket != INVALID_SOCKET)
         {
-            acceptedSockets[socketIndex] = acceptedSocket;
+            DWORD ThreadID;
 
-            // Set acceptedSocket to non-blocking mode
-            unsigned long mode = 1;
-            iResult = ioctlsocket(acceptedSockets[socketIndex], FIONBIO, &mode);
-            if (iResult != NO_ERROR)
-            {
-                printf("ioctlsocket failed with error: %ld\n", iResult);
-            }
+            ThreadData receiveMessagesThreadData;
+            receiveMessagesThreadData.socket = acceptedSocket;
 
-            socketIndex++;
+            hReceivers[recvIndex] = CreateThread(NULL, 0, &receiveMessages, &receiveMessagesThreadData, 0, &ThreadID);
+            recvIndex++;
         }
         else
         {
@@ -375,63 +359,55 @@ DWORD WINAPI receiveMessages(LPVOID lpParam)
 
     while (true)
     {
-        for (int i = 0; i < socketIndex; i++)
+        iResult = recv(receiveMessagesThreadData.socket, receiveMessagesThreadData.buffer, DEFAULT_BUFLEN, 0);
+
+        if (iResult > 0)
         {
-            iResult = recv(acceptedSockets[i], receiveMessagesThreadData.buffer, DEFAULT_BUFLEN, 0);
+            Message message = *(Message*)receiveMessagesThreadData.buffer;
 
-            if (iResult > 0)
+            EnterCriticalSection(&ConsoleAccess);
+            printf("Received from previous instance\n");
+            printf("[%s]: %d\n", message.isImportant ? "IMPORTANT" : "STANDARD", message.value);
+            printf("==========================================\n");
+            LeaveCriticalSection(&ConsoleAccess);
+
+            if (message.isImportant)
             {
-                // TODO - Naredni deo koda (unutar iResult > 0)
-                // obraditi u novoj niti preko processMessage funkcije
-                // u nit kao parametar poslati receiveMessagesThreadData zbog citanja buffera
-                // Nit ce aktivirati jedan od dva semafora da bi se pokrenulo slanje
+                EnterCriticalSection(&ImportantBufferAccess);
 
-                Message message = *(Message*)receiveMessagesThreadData.buffer;
+                addMessageToBuffer(&ImportantBuffer, message);
 
-                EnterCriticalSection(&ConsoleAccess);
-                printf("==========================================\n");
-                printf("Received from previous instance\n");
-                printf("[%s]: %d\n", message.isImportant ? "IMPORTANT" : "STANDARD", message.value);
-                LeaveCriticalSection(&ConsoleAccess);
+                LeaveCriticalSection(&ImportantBufferAccess);
 
-                if (message.isImportant)
-                {
-                    EnterCriticalSection(&ImportantBufferAccess);
-
-                    addMessageToBuffer(&ImportantBuffer, message);
-
-                    LeaveCriticalSection(&ImportantBufferAccess);
-
-                    ReleaseSemaphore(ImportantBufferFull, 1, NULL);
-                }
-                else
-                {
-                    EnterCriticalSection(&StandardBufferAccess);
-
-                    addMessageToBuffer(&StandardBuffer, message);
-
-                    LeaveCriticalSection(&StandardBufferAccess);
-
-                    ReleaseSemaphore(StandardBufferFull, 1, NULL);
-                }
-            }
-            else if (iResult == 0)
-            {
-                printf("Connection with previous instance closed.\n");
-                closesocket(acceptedSockets[i]);
-                continue;
+                ReleaseSemaphore(ImportantBufferFull, 1, NULL);
             }
             else
             {
-                if (WSAGetLastError() == WSAEWOULDBLOCK)
-                {
+                EnterCriticalSection(&StandardBufferAccess);
 
-                }
-                else
-                {
-                    closesocket(acceptedSockets[i]);
-                    continue;
-                }
+                addMessageToBuffer(&StandardBuffer, message);
+
+                LeaveCriticalSection(&StandardBufferAccess);
+
+                ReleaseSemaphore(StandardBufferFull, 1, NULL);
+            }
+        }
+        else if (iResult == 0)
+        {
+            printf("Connection with previous instance closed.\n");
+            closesocket(receiveMessagesThreadData.socket);
+            break;
+        }
+        else
+        {
+            if (WSAGetLastError() == WSAEWOULDBLOCK)
+            {
+
+            }
+            else
+            {
+                closesocket(receiveMessagesThreadData.socket);
+                break;
             }
         }
     }
@@ -457,9 +433,9 @@ DWORD WINAPI sendImportant(LPVOID lpParam)
         //ReleaseSemaphore(ImportantBufferEmpty, 1, NULL);
 
         EnterCriticalSection(&ConsoleAccess);
-        printf("==========================================\n");
         printf("Forwarding IMPORTANT message to %s\n", sendImportantThreadData.instancePort == 5000 ? "DESTINATION" : "AGREGATOR");
         printf("= %d\n", message.value);
+        printf("==========================================\n");
         LeaveCriticalSection(&ConsoleAccess);
 
         iResult = send(sendImportantThreadData.socket, (const char*)&message, sizeof(message), 0);
@@ -496,10 +472,7 @@ DWORD WINAPI sendStandard(LPVOID lpParam)
         LeaveCriticalSection(&StandardBufferAccess);
 
         EnterCriticalSection(&ConsoleAccess);
-        printf("==========================================\n");
         printf("Forwarding STANDARD messages to %s\n", sendStandardThreadData.instancePort == 5000 ? "DESTINATION" : "AGREGATOR");
-
-        printf("COUNT = %d\n", messageCount); // Za testiranje
 
         for (int i = 0; i < messageCount; i++)
         {
@@ -516,6 +489,8 @@ DWORD WINAPI sendStandard(LPVOID lpParam)
                 return 1;
             }
         }
+
+        printf("==========================================\n");
 
         LeaveCriticalSection(&ConsoleAccess);
     }

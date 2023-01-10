@@ -9,9 +9,6 @@
 
 #define SAFE_CLOSE_HANDLE(handle) if(handle) { CloseHandle(handle); }
 
-SOCKET acceptedSockets[MAX_SOCKET_LIMIT];
-int socketIndex = 0;
-
 int totalSum = 0;
 
 // Variable used to store function return value
@@ -30,6 +27,9 @@ struct ThreadData {
 };
 
 HANDLE FinishSignal;
+
+int recvIndex = 0;
+HANDLE hReceivers[MAX_SOCKET_LIMIT];
 
 CRITICAL_SECTION TotalSumAccess;
 
@@ -112,8 +112,8 @@ int main(void)
     FinishSignal = CreateSemaphore(0, 0, 2, NULL);
 
     // Create all threads
-    DWORD SocketAcceptorID, ReceiverID;
-    HANDLE hSocketAcceptor, hReceiver;
+    DWORD SocketAcceptorID;
+    HANDLE hSocketAcceptor;
 
     if (FinishSignal)
     {
@@ -124,12 +124,7 @@ int main(void)
         acceptSocketsThreadData.socket = listeningSocket;
         hSocketAcceptor = CreateThread(NULL, 0, &acceptSockets, &acceptSocketsThreadData, 0, &SocketAcceptorID);
 
-        // Thread za primanje podataka sa prethodne instance
-        ThreadData receiveMessagesThreadData;
-        receiveMessagesThreadData.socket = listeningSocket;
-        hReceiver = CreateThread(NULL, 0, &receiveMessages, &receiveMessagesThreadData, 0, &ReceiverID);
-
-        if (!hSocketAcceptor || !hReceiver)
+        if (!hSocketAcceptor)
         {
             ReleaseSemaphore(FinishSignal, 2, NULL);
         }
@@ -137,11 +132,6 @@ int main(void)
         if (hSocketAcceptor)
         {
             WaitForSingleObject(hSocketAcceptor, INFINITE);
-        }
-
-        if (hReceiver)
-        {
-            WaitForSingleObject(hReceiver, INFINITE);
         }
     }
 
@@ -160,13 +150,12 @@ int main(void)
     // Cleanup
     closesocket(listeningSocket);
     closesocket(acceptedSocket);
-    for (int i = 0; i < socketIndex; i++) {
-        closesocket(acceptedSockets[i]);
-    }
 
     SAFE_CLOSE_HANDLE(hSocketAcceptor);
-    SAFE_CLOSE_HANDLE(hReceiver);
     SAFE_CLOSE_HANDLE(FinishSignal);
+    for (int i = 0; i < recvIndex; i++) {
+        SAFE_CLOSE_HANDLE(hReceivers[i]);
+    }
 
     DeleteCriticalSection(&TotalSumAccess);
 
@@ -199,17 +188,13 @@ DWORD WINAPI acceptSockets(LPVOID lpParam)
 
         if (acceptedSocket != INVALID_SOCKET)
         {
-            acceptedSockets[socketIndex] = acceptedSocket;
-            
-            // Set acceptedSocket to non-blocking mode
-            unsigned long mode = 1;
-            iResult = ioctlsocket(acceptedSockets[socketIndex], FIONBIO, &mode);
-            if (iResult != NO_ERROR)
-            {
-                printf("ioctlsocket failed with error: %ld\n", iResult);
-            }
+            DWORD ThreadID;
 
-            socketIndex++;
+            ThreadData receiveMessagesThreadData;
+            receiveMessagesThreadData.socket = acceptedSocket;
+
+            hReceivers[recvIndex] = CreateThread(NULL, 0, &receiveMessages, &receiveMessagesThreadData, 0, &ThreadID);
+            recvIndex++;
         }
         else
         {
@@ -234,46 +219,40 @@ DWORD WINAPI receiveMessages(LPVOID lpParam)
 
     while (true)
     {
-        for (int i = 0; i < socketIndex; i++)
+        iResult = recv(receiveMessagesThreadData.socket, receiveMessagesThreadData.buffer, DEFAULT_BUFLEN, 0);
+
+        if (iResult > 0)
         {
-            iResult = recv(acceptedSockets[i], receiveMessagesThreadData.buffer, DEFAULT_BUFLEN, 0);
+            Message* message = (Message *)receiveMessagesThreadData.buffer;
 
-            if (iResult > 0)
+            printf("Received from previous instance\n");
+            printf("[%s]: %d\n", message->isImportant ? "IMPORTANT" : "STANDARD", message->value);
+
+            EnterCriticalSection(&TotalSumAccess);
+
+            totalSum += message->value;
+            printf("Total count: %d\n", totalSum);
+
+            LeaveCriticalSection(&TotalSumAccess);
+
+            printf("==========================================\n");
+        }
+        else if (iResult == 0)
+        {
+            printf("Connection with previous instance closed.\n");
+            closesocket(receiveMessagesThreadData.socket);
+            break;
+        }
+        else
+        {
+            if (WSAGetLastError() == WSAEWOULDBLOCK)
             {
-                // Poruka je primljena bez gresaka
-
-                printf("Received from previous instance\n");
-
-                Message* message = (Message *)receiveMessagesThreadData.buffer;
-
-                printf("[%s]: %d\n", message->isImportant ? "IMPORTANT" : "STANDARD", message->value);
-
-                EnterCriticalSection(&TotalSumAccess);
-
-                totalSum += message->value;
-                printf("Total count: %d\n", totalSum);
-
-                LeaveCriticalSection(&TotalSumAccess);
-
-                printf("==========================================\n");
-            }
-            else if (iResult == 0)
-            {
-                printf("Connection with previous instance closed.\n");
-                closesocket(acceptedSockets[i]);
-                continue;
+                
             }
             else
             {
-                if (WSAGetLastError() == WSAEWOULDBLOCK)
-                {
-
-                }
-                else
-                {
-                    closesocket(acceptedSockets[i]);
-                    continue;
-                }
+                closesocket(receiveMessagesThreadData.socket);
+                break;
             }
         }
     }
